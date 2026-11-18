@@ -1,0 +1,119 @@
+// TRABALHO 3 - REPLICAÇÃO DE DADOS, ELEIÇÃO E TOLERÂNCIA A FALHAS (gRPC, MODELO PULL)
+// BSI - Sistemas Distribuídos - Profa. Ana Cristina Barreiras Kochem Vendramin
+// Aluno: Vitor Chiuco Zeni
+//
+// Contrato gRPC entre os nós do cluster e entre o cliente e os nós.
+// Gerar os stubs (a partir da pasta "Projeto 3"):
+//   python -m grpc_tools.protoc -I proto --python_out=. --pyi_out=. --grpc_python_out=. proto/replicacao.proto
+
+syntax = "proto3";
+
+package replicacao;
+
+// --- Serviço entre os nós do cluster ---
+service Cluster {
+  // Candidato -> demais nós (única chamada "push", só durante a eleição)
+  rpc RequestVote (VoteRequest) returns (VoteResponse);
+
+  // Réplica -> líder, a cada 100 ms (pull): busca dados, confirma e serve de heartbeat
+  rpc Fetch (FetchRequest) returns (FetchResponse);
+}
+
+// --- Serviço exposto ao cliente ---
+service Armazenamento {
+  rpc Gravar      (GravarRequest)    returns (GravarResponse);
+  rpc Consultar   (ConsultarRequest) returns (ConsultarResponse);
+  rpc ObterEstado (Vazio)            returns (EstadoNo);
+  rpc Depurar     (DepurarRequest)   returns (EstadoNo);   // Apoio aos cenários de teste
+}
+
+enum Status {
+  OK         = 0;
+  DIVERGENTE = 1;   // Fetch: log da réplica conflita com o do líder
+  NAO_LIDER  = 2;   // Quem recebeu não é o líder (vem com lider_id, se conhecido)
+  SEM_QUORUM = 3;   // Gravar: menos de 3 nós ativos, escrita recusada
+  PENDENTE   = 4;   // Gravar: gravada no log, mas não comitou dentro do prazo
+}
+
+message Entrada {
+  int64  indice = 1;     // Posição sequencial no log (começa em 1)
+  int64  termo  = 2;     // Termo do líder que recebeu a escrita
+  string chave  = 3;
+  string valor  = 4;
+}
+
+message VoteRequest {
+  int64 termo         = 1;
+  int32 candidato_id  = 2;
+  int64 ultimo_indice = 3;
+  int64 ultimo_termo  = 4;
+}
+
+message VoteResponse {
+  int64 termo          = 1;
+  bool  voto_concedido = 2;
+}
+
+message FetchRequest {
+  int64 termo         = 1;   // Termo atual da réplica
+  int32 replica_id    = 2;
+  int64 ultimo_indice = 3;   // Última entrada que a réplica tem (0 = log vazio)
+  int64 ultimo_termo  = 4;   // Termo dessa entrada
+}
+
+message FetchResponse {
+  int64   termo              = 1;
+  Status  status             = 2;   // OK | DIVERGENTE | NAO_LIDER
+  int32   lider_id           = 3;   // Dica de quem é o líder (0 = desconhecido)
+  repeated Entrada entradas  = 4;   // Entradas a partir de ultimo_indice + 1
+  int64   commit_index       = 5;   // Índice de commit atual do líder
+  int64   indice_consistente = 6;   // Em DIVERGENTE: truncar tudo após este índice
+}
+
+message GravarRequest {
+  string chave         = 1;
+  string valor         = 2;
+  bool   simular_queda = 3;   // Cenário 4B: líder grava no log e encerra o processo
+}
+
+message GravarResponse {
+  Status status   = 1;
+  int32  lider_id = 2;   // Em NAO_LIDER: para onde o cliente deve redirecionar
+  int64  indice   = 3;
+  int64  termo    = 4;
+  string mensagem = 5;
+}
+
+message ConsultarRequest {
+  string chave = 1;   // Vazia = todos os dados comitados
+}
+
+message Registro {
+  string chave  = 1;
+  string valor  = 2;
+  int64  indice = 3;   // Índice do log que gravou este valor
+}
+
+message ConsultarResponse {
+  repeated Registro registros = 1;
+  EstadoNo estado = 2;   // Quem respondeu (papel, termo, commit)
+}
+
+message EstadoNo {
+  int32  no_id          = 1;
+  string papel          = 2;   // seguidor | candidato | lider
+  int64  termo          = 3;
+  int32  voto           = 4;   // voted_for (0 = nenhum)
+  int32  lider_id       = 5;
+  int64  commit_index   = 6;
+  int64  ultimo_indice  = 7;
+  repeated Entrada log  = 8;   // Log completo (para o comando "log <id>")
+  repeated int32 replicas_ativas = 9;   // Só preenchido pelo líder
+  bool   commit_segurado = 10;
+}
+
+message DepurarRequest {
+  string acao = 1;   // "segurar_commit" | "liberar_commit"
+}
+
+message Vazio {}
